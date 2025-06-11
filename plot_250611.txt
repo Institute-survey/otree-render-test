@@ -1,0 +1,116 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+import glob
+from collections import Counter
+import traceback
+
+# --- 入力ディレクトリ --- #
+input_dir = ".."  # norm_distributionとcooperation_ratesのcsvがある場所（A）
+
+# --- 規範パターン定義（16種類） --- #
+norm_patterns = [
+    "GGGG", "GGGB", "GGBG", "GGBB",
+    "GBGG", "GBGB", "GBBG", "GBBB",
+    "BGGG", "BGGB", "BGBG", "BGBB",
+    "BBGG", "BBGB", "BBBG", "BBBB"
+]
+
+# --- 規範割合の計算 --- #
+def compute_norm_ratios(df, norm_patterns):
+    generations = df["Generation"].values
+    agent_data = df.drop(columns=["Generation"])
+    norm_ratio_per_gen = []
+    for _, row in agent_data.iterrows():
+        counts = Counter(row)
+        total = len(row)
+        ratios = {norm: counts.get(norm, 0) / total for norm in norm_patterns}
+        norm_ratio_per_gen.append(ratios)
+    ratio_df = pd.DataFrame(norm_ratio_per_gen)
+    ratio_df["Generation"] = generations
+    return ratio_df
+
+# --- グラフ描画（norm + cooperation） --- #
+def plot_norm_and_cooperation(ratio_df, coop_df, output_path, title):
+    fig, ax1 = plt.subplots(figsize=(12, 8))
+
+    # 左Y軸（規範割合）
+    for norm in norm_patterns:
+        ax1.plot(ratio_df["Generation"], ratio_df[norm], label=norm)
+    ax1.set_xlabel("Generation")
+    ax1.set_ylabel("Norm Proportion")
+    ax1.set_title(title)
+
+    # 右Y軸（協力率）
+    ax2 = ax1.twinx()
+    if "Sim0" in coop_df.columns:
+        ax2.plot(coop_df["Generation"], coop_df["Sim0"],
+                 color="black", linewidth=2, linestyle="dotted",
+                 label="Cooperation Rate")
+        ax2.set_ylabel("Cooperation Rate")
+        ax2.set_ylim(0, 1)
+
+    # 凡例とレイアウト
+    ax1.legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+# --- メイン処理 --- #
+csv_files = glob.glob(os.path.join(input_dir, "norm_distribution*.csv"))
+
+for csv_file in csv_files:
+    filename = os.path.basename(csv_file)
+
+    if not filename.endswith(".csv"):
+        continue
+
+    try:
+        print(f"Processing: {filename}")
+
+        # === norm_distribution 読み込みと整形 ===
+        df = pd.read_csv(csv_file)
+        valid_columns = ["Generation"] + [col for col in df.columns if col.startswith("Agent_")]
+        df = df[valid_columns]
+        ratio_df = compute_norm_ratios(df, norm_patterns)
+
+        # === cooperation_rates ファイル名生成（試行番号取得）===
+        base_name = os.path.splitext(filename)[0]
+        trial_num = None
+        if base_name.startswith("norm_distribution"):
+            base_name = base_name.replace("norm_distribution", "")  # 400_..._benefitX_Y
+
+        parts = base_name.split("_")
+        if parts[-1].isdigit():
+            trial_num = int(parts[-1])  # 試行番号
+            base_name = "_".join(parts[:-1])  # _Y を除去
+
+        coop_name = "cooperation_rates_" + base_name + ".csv"
+        coop_path = os.path.join(input_dir, coop_name)
+
+        if not os.path.exists(coop_path):
+            print(f"[WARNING] No cooperation file: {coop_path}")
+            continue
+
+        # === cooperation_rates 読み込みと Sim列の取得 ===
+        coop_df = pd.read_csv(coop_path)
+        coop_df.columns = [col.strip() for col in coop_df.columns]
+        sim_col = f"Sim{trial_num}" if trial_num is not None else "Sim0"
+        if sim_col not in coop_df.columns or "Generation" not in coop_df.columns:
+            print(f"[WARNING] Missing required columns ({sim_col}) in {coop_name}")
+            continue
+        coop_df = coop_df[["Generation", sim_col]]
+        coop_df.rename(columns={sim_col: "Sim0"}, inplace=True)  # downstreamで使いやすく
+
+        # === 出力ファイル名・タイトル ===
+        output_filename = os.path.splitext(filename)[0] + ".png"
+        output_path = os.path.join(".", output_filename)
+        plot_title = os.path.splitext(filename)[0]
+
+        # === グラフ出力 ===
+        plot_norm_and_cooperation(ratio_df, coop_df, output_path, plot_title)
+
+    except Exception as e:
+        print(f"[ERROR] Skipped file: {csv_file}")
+        traceback.print_exc()

@@ -1,0 +1,97 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import re
+from glob import glob
+import traceback
+
+# --- 設定 --- #
+input_dir = ".."
+output_dir = "."
+dpi = 300
+draw_grid = True
+
+# --- 条件範囲 --- #
+benefits = [round(x * 0.5, 1) for x in range(2, 11)]  # 1.0 to 5.0 (0.5刻み)
+probabilities = [round(x * 0.05, 2) for x in range(21)]  # 0.0 to 1.0 (0.05刻み)
+target_norms = {"GBBB", "GBBG", "GBGB", "GBGG"}
+
+# --- 正規表現パターン --- #
+pattern = re.compile(
+    r"cooperation_rates_400_([A-Z]{4})_probability([0-9.]+)"
+    r"_action_error0.001_evaluate_error0.001_public_error0.001_benefit([0-9.]+)\.csv"
+)
+
+# --- データ格納用 --- #
+data = {}
+
+# --- ファイル走査と読み取り --- #
+csv_files = glob(os.path.join(input_dir, "cooperation_rates_400_*.csv"))
+
+for file in csv_files:
+    try:
+        filename = os.path.basename(file)
+        match = pattern.match(filename)
+        if not match:
+            continue
+
+        norm, prob_str, benefit_str = match.groups()
+        if norm not in target_norms:
+            continue
+
+        prob = float(prob_str)
+        benefit = float(benefit_str)
+
+        df = pd.read_csv(file)
+        sim_cols = [col for col in df.columns if col.startswith("Sim")]
+
+        if "Generation" not in df.columns or not sim_cols:
+            continue
+
+        subset = df[(df["Generation"] >= 902) & (df["Generation"] <= 1001)]
+        if subset.empty:
+            continue
+
+        # すべてのSim列の平均を計算
+        mean_coop = subset[sim_cols].mean(axis=0).mean()
+
+        data.setdefault(norm, {}).setdefault(benefit, {})[prob] = mean_coop
+
+    except Exception as e:
+        print(f"[ERROR] Skipping file: {file}")
+        traceback.print_exc()
+
+# --- ヒートマップ描画関数 --- #
+def plot_heatmap(norm):
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=dpi)
+    grid = np.full((len(benefits), len(probabilities)), np.nan)
+
+    for bi, benefit in enumerate(benefits):
+        for pi, prob in enumerate(probabilities):
+            val = data.get(norm, {}).get(benefit, {}).get(prob, np.nan)
+            grid[len(benefits) - 1 - bi][pi] = val  # benefit: 上から高くなるように反転
+
+    sns.heatmap(
+        grid, ax=ax, cmap="Blues", vmin=0, vmax=1,
+        xticklabels=probabilities,
+        yticklabels=list(reversed(benefits)),
+        linewidths=0.5 if draw_grid else 0,
+        linecolor='gray' if draw_grid else None,
+        cbar_kws={"label": "Mean Cooperation Rate"}
+    )
+
+    ax.set_title(f"Cooperation Heatmap – Norm: {norm}", fontsize=14)
+    ax.set_xlabel("Probability of Public Evaluation")
+    ax.set_ylabel("Benefit of Cooperation")
+
+    output_path = os.path.join(output_dir, f"cooperation_heatmap_{norm}.png")
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved heatmap: {output_path}")
+
+# --- 実行 --- #
+for norm in sorted(target_norms):
+    plot_heatmap(norm)
