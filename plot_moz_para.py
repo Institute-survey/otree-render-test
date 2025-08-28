@@ -1,95 +1,103 @@
 import os
+import re
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter, defaultdict
-import glob
-import re
-from concurrent.futures import ProcessPoolExecutor
 
-# === 設定 ===
-base_dir = "."  # スクリプト設置ディレクトリから探索
+# --- 設定 --- #
+base_dir = "."
 output_dir = "plot"
 os.makedirs(output_dir, exist_ok=True)
 target_benefit = "5"
-target_norms = {"GGGG", "GBGG", "GBGB", "GBBG", "GBBB"}
-
 norm_patterns = [
     "GGGG", "GGGB", "GGBG", "GGBB",
     "GBGG", "GBGB", "GBBG", "GBBB",
     "BGGG", "BGGB", "BGBG", "BGBB",
     "BBGG", "BBGB", "BBBG", "BBBB"
 ]
+highlight_norms = {
+    "GGGG": "skyblue",
+    "GBGG": "lightgreen",
+    "GBGB": "salmon",
+    "GBBG": "orange",
+    "GBBB": "plum"
+}
 
-# === 規範割合の集計 ===
-def compute_avg_norm_distribution(file_list):
-    norm_counts = []
-    for f in file_list:
-        df = pd.read_csv(f)
-        df = df[df["Generation"] > df["Generation"].max() - 50]
-        agent_cols = [col for col in df.columns if col.startswith("Agent_")]
-        for _, row in df[agent_cols].iterrows():
-            counts = Counter(row)
-            norm_counts.append(counts)
-    total_counts = Counter()
-    for c in norm_counts:
-        total_counts.update(c)
-    total = sum(total_counts.values())
+# --- ファイル名の正規表現 --- #
+file_pattern = re.compile(
+    r"norm_distribution400_([A-Z]{4})_probability([\d.]+)_action_error[\d.]+_evaluate_error[\d.]+_public_error[\d.]+_benefit5_(\d+)\.csv"
+)
+
+# --- 規範割合を計算（最終50世代の平均） --- #
+def extract_average_ratios(filepath):
+    df = pd.read_csv(filepath)
+    agent_cols = [col for col in df.columns if col.startswith("Agent_")]
+    df = df[["Generation"] + agent_cols]
+    df = df.tail(50)
+
+    all_counts = Counter()
+    for _, row in df.iterrows():
+        counts = Counter(row[1:])
+        all_counts.update(counts)
+
+    total = sum(all_counts.values())
     if total == 0:
-        return None
-    norm_ratios = {norm: total_counts.get(norm, 0) / total for norm in norm_patterns}
-    return norm_ratios
+        return {norm: 0 for norm in norm_patterns}
+    return {norm: all_counts.get(norm, 0) / total for norm in norm_patterns}
 
-# === モザイク描画 ===
-def draw_mosaic(norm_ratios, key):
-    from matplotlib.patches import Rectangle
+# --- ファイル探索とグループ化 --- #
+grouped_data = defaultdict(lambda: defaultdict(list))
 
-    fig, ax = plt.subplots(figsize=(10, 2))
-    x_start = 0
-    for norm in norm_patterns:
-        width = norm_ratios.get(norm, 0)
-        color = "white"
-        if norm in target_norms:
-            color_map = {
-                "GGGG": "skyblue",
-                "GBGG": "lightgreen",
-                "GBGB": "salmon",
-                "GBBG": "orange",
-                "GBBB": "plum"
-            }
-            color = color_map.get(norm, "gray")
-        rect = Rectangle((x_start, 0), width, 1, facecolor=color, edgecolor='black')
-        ax.add_patch(rect)
-        x_start += width
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 1)
-    ax.axis('off')
-    ax.set_title(key, fontsize=10)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"mosaic_{key}.png"))
+for root, _, files in os.walk(base_dir):
+    for filename in files:
+        if not filename.startswith("norm_distribution400_") or "benefit5" not in filename:
+            continue
+
+        match = file_pattern.match(filename)
+        if not match:
+            continue
+
+        public_norm, prob, _ = match.groups()
+        prob = float(prob)
+        filepath = os.path.join(root, filename)
+        grouped_data[public_norm][prob].append(filepath)
+
+# --- public_normごとにプロット作成 --- #
+for pubnorm, prob_dict in grouped_data.items():
+    sorted_probs = sorted(prob_dict.keys())
+    fig, axes = plt.subplots(nrows=len(norm_patterns), ncols=len(sorted_probs),
+                             figsize=(len(sorted_probs) * 1.5, len(norm_patterns) * 0.5 + 2),
+                             sharex=True, sharey=True)
+
+    if len(sorted_probs) == 1:
+        axes = np.expand_dims(axes, axis=1)
+
+    for col_idx, prob in enumerate(sorted_probs):
+        file_list = prob_dict[prob]
+        df_list = [extract_average_ratios(f) for f in file_list]
+        avg_df = pd.DataFrame(df_list).mean().to_dict()
+
+        total_width = 1.0
+        cum_width = 0.0
+        for row_idx, norm in enumerate(norm_patterns):
+            width = avg_df.get(norm, 0)
+            color = highlight_norms.get(norm, "lightgrey")
+            ax = axes[row_idx][col_idx]
+            ax.barh(0, width, left=cum_width, height=1.0, color=color, edgecolor='black')
+            cum_width += width
+
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis('off')
+            if col_idx == 0:
+                ax.set_ylabel(norm, rotation=0, labelpad=30, fontsize=8, va='center')
+
+        axes[0][col_idx].set_title(f"p={prob:.2f}", fontsize=9)
+
+    plt.suptitle(f"Mosaic Plot – Public Norm: {pubnorm}", fontsize=12)
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    output_path = os.path.join(output_dir, f"mosaic_summary_{pubnorm}.png")
+    plt.savefig(output_path)
     plt.close()
-
-# === ファイルグループ化 ===
-file_dict = defaultdict(list)
-for dirpath, _, filenames in os.walk(base_dir):
-    for file in filenames:
-        if file.startswith("norm_distribution") and file.endswith(".csv"):
-            if f"benefit{target_benefit}_" not in file:
-                continue
-            match = re.match(r"norm_distribution(.+)_\d+\.csv", file)
-            if match:
-                key = match.group(1)
-                full_path = os.path.join(dirpath, file)
-                file_dict[key].append(full_path)
-
-# === 並列処理 ===
-def process_group(args):
-    key, files = args
-    avg_ratios = compute_avg_norm_distribution(files)
-    if avg_ratios:
-        draw_mosaic(avg_ratios, key)
-    return key
-
-with ProcessPoolExecutor() as executor:
-    results = list(executor.map(process_group, file_dict.items()))
-
-print(f"✅ 完了: {len(results)} 件のモザイクプロットを plot/ に保存しました。")
+    print(f"[Saved] {output_path}")
