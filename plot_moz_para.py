@@ -1,109 +1,134 @@
 import os
+import glob
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
-import re
-import glob
 from multiprocessing import Pool
+from matplotlib.patches import Rectangle
 
 # --- 設定 --- #
-base_dir = "."  # 実行場所
-target_benefit = "5"
-target_norms = ["GBBB", "GBBG", "GBGB", "GBGG"]
-colored_norms = ["GGGG", "GBGG", "GBGB", "GBBG", "GBBB"]
+base_dir = "."  # データフォルダの親
+target_benefit = 5
+public_norms = ["GBBB", "GBBG", "GBGB", "GBGG"]
+probabilities = [round(p, 2) for p in np.arange(0, 1.01, 0.05)]
+highlight_norms = ["GGGG", "GBGG", "GBGB", "GBBG", "GBBB"]
 norm_patterns = [
     "GGGG", "GGGB", "GGBG", "GGBB",
     "GBGG", "GBGB", "GBBG", "GBBB",
     "BGGG", "BGGB", "BGBG", "BGBB",
     "BBGG", "BBGB", "BBBG", "BBBB"
 ]
-probability_values = [round(i * 0.05, 2) for i in range(21)]  # 0.00〜1.00
+colors = {
+    "GGGG": "#1f77b4", "GBGG": "#2ca02c", "GBGB": "#ff7f0e",
+    "GBBG": "#d62728", "GBBB": "#9467bd"
+}
+output_dir = "plot"
+os.makedirs(output_dir, exist_ok=True)
 
-# --- norm_distributionのパターン --- #
-norm_pattern = re.compile(r"norm_distribution400_([A-Z]{4})_probability([0-9.]+)_.*_benefit5_(\d+)\.csv")
+# --- 条件抽出ヘルパー --- #
+def extract_condition(filename):
+    parts = filename.replace(".csv", "").split("_")
+    if len(parts) < 8:
+        return None
+    norm = parts[1]
+    prob = float(parts[2].replace("probability", ""))
+    benefit = int(parts[-1].replace("benefit", ""))
+    return norm, prob, benefit
 
-# --- ディレクトリ下の全CSV探索 --- #
-def collect_all_csv():
-    all_csv = []
-    for subdir in os.listdir(base_dir):
-        full_path = os.path.join(base_dir, subdir)
-        if not os.path.isdir(full_path) or not subdir.startswith("pubprob_"):
-            continue
-        all_csv.extend(glob.glob(os.path.join(full_path, "norm_distribution*.csv")))
-    return all_csv
+# --- 対象ファイルの収集と正確な割り当て --- #
+def collect_files_by_norm():
+    all_dirs = [d for d in sorted(os.listdir(base_dir)) if d.startswith("pubprob_")]
+    grouped = {pn: [] for pn in public_norms}
 
-# --- 規範割合を計算（最終50世代） --- #
-def compute_average_ratios(df):
-    latest_df = df.tail(50)
-    norms_only = latest_df.drop(columns=["Generation"])
-    counter = Counter(norm for row in norms_only.itertuples(index=False) for norm in row)
-    total = sum(counter.values())
-    return {k: counter.get(k, 0) / total for k in norm_patterns}
+    for d in all_dirs:
+        full_path = os.path.join(base_dir, d)
+        files = glob.glob(os.path.join(full_path, "norm_distribution*.csv"))
+        for f in sorted(files):
+            cond = extract_condition(os.path.basename(f))
+            if cond is None:
+                continue
+            norm, prob, benefit = cond
+            if norm in grouped and benefit == target_benefit:
+                grouped[norm].append(f)
 
-# --- 各public_normに対して処理 --- #
-def process_public_norm(public_norm):
-    print(f"[INFO] Processing: {public_norm}")
-    files = collect_all_csv()
-    records = []
+    return grouped
+
+# --- モザイクプロット作成（1 public_norm ごと） --- #
+def process_public_norm(norm_and_files):
+    norm, files = norm_and_files
+    print(f"[INFO] Processing: {norm}")
+    aggregated = {}
 
     for file in files:
-        fname = os.path.basename(file)
-        match = norm_pattern.match(fname)
-        if not match:
+        df = pd.read_csv(file)
+        if "Generation" not in df.columns:
             continue
+        # GenerationとAgent列に限定
+        agent_cols = ["Generation"] + [col for col in df.columns if col.startswith("Agent_")]
+        df = df[agent_cols]
 
-        norm_label, prob, sim_id = match.groups()
-        if norm_label != public_norm:
-            continue
-        prob = round(float(prob), 2)
+        # 最終50世代だけ抽出
+        df_tail = df[df["Generation"] >= df["Generation"].max() - 49]
 
-        try:
-            df = pd.read_csv(file)
-            if "Generation" not in df.columns:
-                continue
-            avg_ratios = compute_average_ratios(df)
-            avg_ratios["probability"] = prob
-            records.append(avg_ratios)
-        except Exception as e:
-            print(f"[ERROR] Failed to read {file}: {e}")
-            continue
+        # 行ごとにカウント
+        for _, row in df_tail.iterrows():
+            prob = extract_condition(os.path.basename(file))[1]
+            row = row.drop("Generation")
+            total = len(row)
+            counts = Counter(row)
+            ratios = {n: counts.get(n, 0) / total for n in norm_patterns}
+            if prob not in aggregated:
+                aggregated[prob] = []
+            aggregated[prob].append(ratios)
 
-    if not records:
-        print(f"[WARNING] No valid data for {public_norm}")
-        return
+    # --- 平均を取る --- #
+    average_ratios = {}
+    for prob in probabilities:
+        entries = aggregated.get(prob, [])
+        if entries:
+            df = pd.DataFrame(entries)
+            avg = df.mean().to_dict()
+        else:
+            avg = {n: 0 for n in norm_patterns}
+        average_ratios[prob] = avg
 
-    # --- DataFrameにまとめて整形 --- #
-    df_all = pd.DataFrame(records)
-    df_all = df_all.groupby("probability").mean().reset_index()
-    df_all = df_all.sort_values(by="probability")
-
-    # --- モザイクプロット作成 --- #
+    # --- プロット作成 --- #
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    bottoms = [0] * len(df_all)
-    for norm in norm_patterns:
-        heights = df_all[norm].values
-        color = "black" if norm not in colored_norms else None  # white以外にしたいなら個別指定可
-        barcolor = "white" if norm not in colored_norms else None
-        ax.barh(df_all["probability"], heights, left=bottoms, label=norm if norm in colored_norms else "",
-                color=barcolor, edgecolor="black", linewidth=0.5)
-        bottoms = [b + h for b, h in zip(bottoms, heights)]
+    for i, prob in enumerate(probabilities):
+        x_start = 0
+        for norm in norm_patterns:
+            width = average_ratios[prob].get(norm, 0)
+            height = 1 / len(probabilities)
+            y = i * height
+            rect_color = colors[norm] if norm in colors else "white"
+            edge_color = "black"
+            ax.add_patch(Rectangle(
+                (x_start, y), width, height,
+                facecolor=rect_color,
+                edgecolor=edge_color
+            ))
+            x_start += width
 
     ax.set_xlim(0, 1)
-    ax.set_xlabel("Proportion")
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Norm Proportion")
     ax.set_ylabel("Probability")
-    ax.set_title(f"Norm Distribution (Benefit=5)\nPublic Norm: {public_norm}")
-    ax.invert_yaxis()
-    ax.grid(True, axis="y", linestyle="--", linewidth=0.5)
-    ax.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-    plt.tight_layout()
+    ax.set_yticks([(i + 0.5) / len(probabilities) for i in range(len(probabilities))])
+    ax.set_yticklabels([str(p) for p in probabilities])
+    ax.set_title(f"Mosaic Plot – Public Norm: {norm}")
 
-    output_name = f"mosaic_{public_norm}.png"
-    plt.savefig(output_name)
+    plt.tight_layout()
+    save_path = os.path.join(output_dir, f"mosaic_plot_{norm}.png")
+    plt.savefig(save_path)
     plt.close()
-    print(f"[Saved] {output_name}")
+    print(f"[Saved] {save_path}")
 
 # --- 並列実行 --- #
 if __name__ == "__main__":
+    grouped_files = collect_files_by_norm()
+    tasks = [(norm, grouped_files[norm]) for norm in public_norms]
+
     with Pool(processes=4) as pool:
-        pool.map(process_public_norm, target_norms)
+        pool.map(process_public_norm, tasks)
