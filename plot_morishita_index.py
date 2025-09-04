@@ -26,14 +26,15 @@ public_norm_targets = ["GBBB", "GBBG", "GBGB", "GBGG"]
 file_pattern = re.compile(
     r"norm_distribution400_([A-Z]{4})_probability([0-9.]+)_.*_benefit([0-9.]+)_(\d+)\.csv"
 )
-def simpson_index(counts):
-    total = sum(counts)
-    if total == 0:
+def morishita_index(counts, total_agents):
+    A = len(counts)
+    N = total_agents
+    if N == 0 or A == 0:
         return np.nan
-    p = [c / total for c in counts]
-    return 1 - sum([v**2 for v in p])
+    S1 = sum(n * (n - 1) for n in counts)
+    return (A / (N * (N - 1))) * S1
 
-def process_public_norm_simpson(public_norm):
+def process_public_norm_morishita(public_norm):
     grid = np.full((len(benefits), len(probabilities)), np.nan)
 
     for subdir in os.listdir(base_dir):
@@ -61,9 +62,9 @@ def process_public_norm_simpson(public_norm):
             all_counts = Counter()
             for _, row in df[agent_cols].iterrows():
                 all_counts.update(row)
-            # +1スムージング
             counts = [all_counts.get(norm, 0) + 1 for norm in norm_patterns]
-            diversity = simpson_index(counts)
+            total_agents = len(agent_cols) * len(df)
+            m_index = morishita_index(counts, total_agents)
 
             # cooperation_rateの平均チェック
             coop_file = file.replace("norm_distribution", "cooperation_rates")
@@ -79,24 +80,24 @@ def process_public_norm_simpson(public_norm):
             bi = benefits.index(benefit)
             pi = probabilities.index(prob)
             if coop_avg >= 0.8:
-                grid[bi, pi] = diversity
+                grid[bi, pi] = m_index
             else:
-                grid[bi, pi] = np.nan  # グレー表示
+                grid[bi, pi] = np.nan  # グレー
 
     # プロット
     fig, ax = plt.subplots(figsize=(12, 6))
     sns.heatmap(
-        grid, cmap="YlGnBu", vmin=0, vmax=1,
+        grid, cmap="viridis", vmin=0, vmax=np.nanmax(grid),
         xticklabels=probabilities,
         yticklabels=list(reversed(benefits)),
         mask=np.isnan(grid), linewidths=0.5, linecolor='gray'
     )
-    ax.set_title(f"Simpson's Diversity Index – {public_norm}")
+    ax.set_title(f"Morishita Index Cλ – {public_norm}")
     ax.set_xlabel("Probability")
     ax.set_ylabel("Benefit")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"simpson_index_{public_norm}.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, f"morishita_index_{public_norm}.png"), dpi=300)
     plt.close()
 
 with ProcessPoolExecutor() as executor:
-    executor.map(process_public_norm_simpson, public_norm_targets)
+    executor.map(process_public_norm_morishita, public_norm_targets)
