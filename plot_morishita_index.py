@@ -1,112 +1,102 @@
+# 共通インポート
 import os
+import re
 import glob
 import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from collections import Counter
-import re
 from concurrent.futures import ProcessPoolExecutor
 
-# === 設定 ===
-base_dir = "."  # pubprob_xxxx フォルダ群のルート
+# 共通設定
+base_dir = "."  # スクリプト直下にpubprob_ディレクトリ群
 output_dir = "plot"
 os.makedirs(output_dir, exist_ok=True)
 
+benefits = [1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]
+probabilities = [round(x * 0.05, 2) for x in range(21)]  # 0.00 ~ 1.00
 norm_patterns = [
     "GGGG", "GGGB", "GGBG", "GGBB",
     "GBGG", "GBGB", "GBBG", "GBBB",
     "BGGG", "BGGB", "BGBG", "BGBB",
     "BBGG", "BBGB", "BBBG", "BBBB"
 ]
-public_norm_targets = {"GBBB", "GBBG", "GBGB", "GBGG"}
-benefits = [round(x * 0.5, 1) for x in range(2, 11)]  # 1.0 ~ 5.0
-probabilities = [round(x * 0.05, 2) for x in range(21)]  # 0.0 ~ 1.0
-
+public_norm_targets = ["GBBB", "GBBG", "GBGB", "GBGG"]
 file_pattern = re.compile(
     r"norm_distribution400_([A-Z]{4})_probability([0-9.]+)_.*_benefit([0-9.]+)_(\d+)\.csv"
 )
-
-def morishita_index(counts, total_agents):
-    N = total_agents
-    A = len(counts)
-    if N == 0 or A == 0:
+def simpson_index(counts):
+    total = sum(counts)
+    if total == 0:
         return np.nan
-    S1 = sum(n * (n - 1) for n in counts)
-    C_lambda = (A / (N * (N - 1))) * S1
-    return C_lambda
+    p = [c / total for c in counts]
+    return 1 - sum([v**2 for v in p])
 
-def process_public_norm_morishita(public_norm):
+def process_public_norm_simpson(public_norm):
     grid = np.full((len(benefits), len(probabilities)), np.nan)
 
     for subdir in os.listdir(base_dir):
-        subpath = os.path.join(base_dir, subdir)
-        if not os.path.isdir(subpath) or not subdir.startswith("pubprob_"):
+        path = os.path.join(base_dir, subdir)
+        if not os.path.isdir(path) or not subdir.startswith("pubprob_"):
             continue
 
-        for csv_file in glob.glob(os.path.join(subpath, "norm_distribution*.csv")):
-            filename = os.path.basename(csv_file)
-            match = file_pattern.match(filename)
-            if not match:
+        for file in glob.glob(os.path.join(path, "norm_distribution*.csv")):
+            m = file_pattern.match(os.path.basename(file))
+            if not m:
                 continue
-
-            pub_norm, prob, benefit, trial = match.groups()
-            if pub_norm != public_norm:
+            pn, prob, benefit, trial = m.groups()
+            if pn != public_norm:
                 continue
-
             prob = float(prob)
             benefit = float(benefit)
             if prob not in probabilities or benefit not in benefits:
                 continue
 
-            try:
-                df = pd.read_csv(csv_file)
-                df = df[df["Generation"] >= 951]
-                agent_cols = [col for col in df.columns if col.startswith("Agent_")]
-                if df.empty or not agent_cols:
-                    continue
+            df = pd.read_csv(file)
+            df = df[df["Generation"] >= 951]
+            agent_cols = [c for c in df.columns if c.startswith("Agent_")]
+            if df.empty: continue
 
-                norm_counts = Counter()
-                for _, row in df[agent_cols].iterrows():
-                    norm_counts.update(row)
-                final_counts = [norm_counts.get(norm, 0) + 1 for norm in norm_patterns]
-                total_agents = len(agent_cols) * len(df)
+            all_counts = Counter()
+            for _, row in df[agent_cols].iterrows():
+                all_counts.update(row)
+            # +1スムージング
+            counts = [all_counts.get(norm, 0) + 1 for norm in norm_patterns]
+            diversity = simpson_index(counts)
 
-                mori_val = morishita_index(final_counts, total_agents)
-
-                coop_file = filename.replace("norm_distribution", "cooperation_rates")
-                coop_path = os.path.join(subpath, coop_file.rsplit("_", 1)[0] + ".csv")
-                coop_df = pd.read_csv(coop_path)
-                sim_col = f"Sim{int(trial)}"
-                if sim_col not in coop_df.columns or "Generation" not in coop_df.columns:
-                    continue
-                coop_df = coop_df[coop_df["Generation"] >= 951]
-                coop_mean = coop_df[sim_col].mean()
-
-                bi = benefits.index(benefit)
-                pi = probabilities.index(prob)
-                if coop_mean >= 0.8:
-                    grid[bi, pi] = mori_val
-                else:
-                    grid[bi, pi] = np.nan
-            except Exception:
+            # cooperation_rateの平均チェック
+            coop_file = file.replace("norm_distribution", "cooperation_rates")
+            coop_file = coop_file.rsplit("_", 1)[0] + ".csv"
+            coop_path = os.path.join(path, coop_file)
+            coop_df = pd.read_csv(coop_path)
+            coop_df.columns = coop_df.columns.str.strip()
+            sim_col = f"Sim{int(trial)}"
+            if sim_col not in coop_df.columns:
                 continue
+            coop_avg = coop_df[coop_df["Generation"] >= 951][sim_col].mean()
 
+            bi = benefits.index(benefit)
+            pi = probabilities.index(prob)
+            if coop_avg >= 0.8:
+                grid[bi, pi] = diversity
+            else:
+                grid[bi, pi] = np.nan  # グレー表示
+
+    # プロット
     fig, ax = plt.subplots(figsize=(12, 6))
     sns.heatmap(
-        grid, cmap="viridis", vmin=0, vmax=np.nanmax(grid),
-        xticklabels=probabilities, yticklabels=benefits,
-        mask=np.isnan(grid), cbar=True,
-        linewidths=0.5, linecolor="gray"
+        grid, cmap="YlGnBu", vmin=0, vmax=1,
+        xticklabels=probabilities,
+        yticklabels=list(reversed(benefits)),
+        mask=np.isnan(grid), linewidths=0.5, linecolor='gray'
     )
-    ax.set_title(f"Morishita Index Cλ (Public Norm: {public_norm})")
+    ax.set_title(f"Simpson's Diversity Index – {public_norm}")
     ax.set_xlabel("Probability")
     ax.set_ylabel("Benefit")
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, f"morishita_index_{public_norm}.png"), dpi=300)
+    plt.savefig(os.path.join(output_dir, f"simpson_index_{public_norm}.png"), dpi=300)
     plt.close()
 
-# 実行
 with ProcessPoolExecutor() as executor:
-    executor.map(process_public_norm_morishita, public_norm_targets)
-
+    executor.map(process_public_norm_simpson, public_norm_targets)
