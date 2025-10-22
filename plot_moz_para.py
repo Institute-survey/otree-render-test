@@ -12,24 +12,27 @@ base_dir = "."
 output_dir = "plot"
 os.makedirs(output_dir, exist_ok=True)
 
+# 修正された規範の順番
 norm_patterns = [
-    "GGGG", "GGGB", "GGBG", "GGBB",
-    "GBGG", "GBGB", "GBBG", "GBBB",
+    "GGGG", "GGGB", "GBGG", "GBGB",
+    "GBBG", "GBBB", "GGBG", "GGBB",
     "BGGG", "BGGB", "BGBG", "BGBB",
     "BBGG", "BBGB", "BBBG", "BBBB"
 ]
-color_norms = {"GGGG", "GBGG", "GBGB", "GBBG", "GBBB"}
+
+# GGGB を含めた強調色規範セット
+color_norms = {"GGGG", "GGGB", "GBGG", "GBGB", "GBBG", "GBBB"}
 public_norm_targets = {"GBBB", "GBBG", "GBGB", "GBGG"}
 
-# === データ格納 ===
+# データ格納
 data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
-# === 正規表現パターン ===
+# ファイル名の正規表現
 file_pattern = re.compile(
     r"norm_distribution400_([A-Z]{4})_probability([0-9.]+)_.*_benefit5_(\d+)\.csv"
 )
 
-# === CSV読み込み ===
+# === データ読み込み ===
 for subdir in os.listdir(base_dir):
     subpath = os.path.join(subdir)
     if not os.path.isdir(subpath) or not subdir.startswith("pubprob"):
@@ -66,7 +69,7 @@ for public_norm in public_norm_targets:
             for norm in norm_patterns
         }
 
-# === プロット関数 ===
+# === プロット関数（並列化） ===
 def plot_mosaic(public_norm):
     probs = sorted(avg_data[public_norm].keys())
     bar_width = 1.0
@@ -75,21 +78,30 @@ def plot_mosaic(public_norm):
     for i, prob in enumerate(probs):
         norm_vals = avg_data[public_norm][prob]
         bottom = 0
-        for norm in norm_patterns:
+        for idx, norm in enumerate(norm_patterns):
             height = norm_vals[norm]
-            color = "white"
-            edgecolor = "black"
             if norm in color_norms:
                 color = {
-                    "GGGG": "#26499d",
-                    "GBGG": "#da536e",
-                    "GBGB": "#00885a",
-                    "GBBG": "#915da3",
-                    "GBBB": "#f6ae54"
+                    "GGGG": "#00429d",
+                    "GGGB": "#225ea8",
+                    "GBGG": "#4671c6",
+                    "GBGB": "#7ea4d6",
+                    "GBBG": "#bcd5e6",
+                    "GBBB": "#e1edf3"
                 }[norm]
+                edgecolor = 'black'
+            else:
+                color = "white"
+                edgecolor = 'none'
+
             ax.bar(i, height, width=bar_width, bottom=bottom,
-                   color=color, edgecolor='black', align='edge')
+                   color=color, edgecolor=edgecolor, linewidth=0.5, align='edge')
             bottom += height
+
+            # --- GBBBとの境界線（GBGB → GBBGの間） ---
+            if norm == "GBGB":
+                ax.plot([i, i + bar_width], [bottom, bottom],
+                        linestyle='--', linewidth=2, color='black')
 
     ax.set_xticks(np.arange(len(probs)) + bar_width / 2)
     ax.set_xticklabels([f"{p:.2f}" for p in probs], rotation=90)
@@ -99,9 +111,9 @@ def plot_mosaic(public_norm):
     ax.set_xlabel("Probability")
     ax.set_title(f"Mosaic Plot of Norms (Public Norm: {public_norm})")
 
-    # 枠線調整
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+    # 外枠の非表示
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
 
     plt.tight_layout()
     save_path = os.path.join(output_dir, f"mosaic_{public_norm}.png")
@@ -109,7 +121,7 @@ def plot_mosaic(public_norm):
     plt.close()
     print(f"[Saved] {save_path}")
 
-# === 並列実行 ===
+# === 並列処理実行 ===
 if __name__ == "__main__":
     with Pool(processes=min(len(public_norm_targets), cpu_count())) as pool:
         pool.map(plot_mosaic, list(public_norm_targets))
