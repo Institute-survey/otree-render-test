@@ -105,7 +105,6 @@ for subdir in os.listdir(base_dir):
             # 各ファイル（＝ディレクトリ×条件）で: Sim全列×最終50世代の平均を1値として追加
             coop_all[pn][prob].append(cdf[sim_cols].mean().mean())
         except Exception:
-            # 読めなければスキップ
             continue
 
 # === 平均比率を用意（積み上げ面グラフ用） ===
@@ -124,15 +123,12 @@ for public_norm in public_norm_targets:
             for n in norm_patterns:
                 avg_data[public_norm][prob][n] /= s
 
-# === 協力率90%未満の判定（棒を透過しない代わりに外へ破線＋凡例） ===
-# coop_flag[public_norm][prob] = True（90%未満あり）/ False
-coop_flag = defaultdict(dict)
+# === 協力率の平均系列（赤破線用） ===
+# coop_mean[public_norm][prob] = 全pubprob*統合の平均協力率（Sim全列×最終50世代の平均をさらに平均）
+coop_mean = defaultdict(dict)
 for public_norm in public_norm_targets:
     for prob, vals in coop_all[public_norm].items():
-        if len(vals) == 0:
-            coop_flag[public_norm][prob] = False
-        else:
-            coop_flag[public_norm][prob] = (np.mean(vals) < 0.9)
+        coop_mean[public_norm][prob] = float(np.mean(vals)) if len(vals) else np.nan
 
 # === プロット（public_norm ごと） ===
 def plot_area(public_norm):
@@ -149,50 +145,41 @@ def plot_area(public_norm):
         colors.append(norm_colors[n])
 
     # 図作成
-    fig, ax = plt.subplots(figsize=(max(8, len(probs)*0.4 + 2), 6))
+    fig, ax = plt.subplots(figsize=(max(8, len(probs)*0.45 + 2), 6))
 
-    # 積み上げ面グラフ（ミルフィーユ）
+    # 積み上げ面グラフ（ミルフィーユ）— 境界線は描かない
     ax.stackplot(probs, series, colors=colors, edgecolor='none')
 
-    # GBGB と GBBG の境界（4層目の上面を太い破線で）
-    # 累積値を作って第4層までの合計を描く
+    # 規範境界：GBGB と GBBG の間（= 上位4層の上面）を黒の太い破線で
     cum4 = np.zeros(len(probs))
     for k in range(4):  # 0:GGGG,1:GGGB,2:GBGG,3:GBGB
         cum4 += np.array(series[k])
-    ax.plot(probs, cum4, linestyle='--', linewidth=2.5, color='black', zorder=10)
+    ax.plot(probs, cum4, linestyle='--', linewidth=2.5, color='black', zorder=10, label="_nolegend_")
 
-    # 協力率90%未満の probability には、図の外へ伸びる破線＋凡例
-    # 破線は y=1.02 → 1.10 に出して注記、軸外に出るように clip_on=False
-    handled_noncoop = False
-    for x in probs:
-        if coop_flag[public_norm].get(x, False):
-            # 縦破線（外側へ）
-            ax.vlines(x, 1.02, 1.10, linestyles='--', linewidth=2.0,
-                      color='black', clip_on=False)
-            handled_noncoop = True
+    # 協力率の赤い破線（同じYスケール 0〜1）
+    coop_y = [coop_mean[public_norm].get(p, np.nan) for p in probs]
+    ax.plot(probs, coop_y, linestyle='--', linewidth=2.0, color='red', zorder=11, label='Cooperation rate')
 
     # 軸・範囲
     ax.set_xlim(min(probs), max(probs))
-    ax.set_ylim(0, 1.08)  # 1を少し超えて破線が出る余裕
+    ax.set_ylim(0, 1)
 
     ax.set_xlabel("Probability")
     ax.set_ylabel("Norm Ratio")
     ax.set_title(f"Stacked Area of Norms (Public Norm: {public_norm})")
 
-    # 凡例：color_norms のみを表示
+    # 凡例：color_norms のみを表示 + 協力率の赤い破線
     from matplotlib.lines import Line2D
     legend_handles = [Line2D([0], [0], color=norm_colors[n], lw=8, label=n) for n in color_norms]
-    if handled_noncoop:
-        legend_handles.append(Line2D([0], [0], color='black', lw=2, linestyle='--', label='Non cooperative'))
+    legend_handles.append(Line2D([0], [0], color='red', lw=2, linestyle='--', label='Cooperation rate'))
 
-    # 凡例は外側へ（被り防止）
+    # 凡例は外側右上へ
     leg = ax.legend(handles=legend_handles, loc='upper right', bbox_to_anchor=(1.25, 1.0), title="Highlighted Norms")
     fig.subplots_adjust(right=0.80)  # 右に余白
 
     # 目盛・枠
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    # y軸ラベルは枠外に（少しだけ余裕）
     ax.tick_params(axis='y', which='both', pad=6)
 
     plt.tight_layout()
