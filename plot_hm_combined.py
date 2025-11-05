@@ -18,17 +18,24 @@ norms_target = ["GBBB", "GBBG", "GBGB", "GBGG"]
 benefits = [round(b, 1) for b in np.arange(1, 5.1, 0.5)]
 probs = [round(p, 2) for p in np.arange(0, 1.01, 0.05)]
 
+# キーを安定化（"0.05" のような文字列キーにする）
+def key_prob(p_float) -> str:
+    return f"{float(p_float):.2f}"
+
+def key_benefit(b_float) -> str:
+    return f"{float(b_float):.1f}"
+
 pattern = re.compile(
     r"cooperation_rates_400_([A-Z]{4})_probability([0-9.]+)_action_error0\.001_evaluate_error0\.001_public_error0\.001_benefit([0-9.]+)\.csv"
 )
 
-# データ格納: data[norm][benefit][prob] = avg
-data = defaultdict(lambda: defaultdict(dict))
+# データ格納: data_vals[norm][benefit_str][prob_str] = [avg_trial1, avg_trial2, ...]
+data_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
-# 探索・集計
+# 探索・集計（julia* ディレクトリをすべて対象）
 for subdir in os.listdir(base_dir):
     subpath = os.path.join(base_dir, subdir)
-    if not os.path.isdir(subpath) or not subdir.startswith("pubprob_"):
+    if not os.path.isdir(subpath) or not subdir.startswith("julia"):
         continue
 
     files = glob(os.path.join(subpath, "cooperation_rates_400_*.csv"))
@@ -43,8 +50,8 @@ for subdir in os.listdir(base_dir):
             if norm not in norms_target:
                 continue
 
-            prob = float(prob)
-            benefit = float(benefit)
+            prob_str = key_prob(prob)
+            benefit_str = key_benefit(benefit)
 
             df = pd.read_csv(file)
             df.columns = [c.strip() for c in df.columns]
@@ -54,43 +61,53 @@ for subdir in os.listdir(base_dir):
             sim_cols = [col for col in df_last.columns if col.startswith("Sim")]
             mean_val = df_last[sim_cols].mean(axis=0).mean()
 
-            data[norm][benefit][prob] = float(mean_val)
+            data_vals[norm][benefit_str][prob_str].append(float(mean_val))
 
         except Exception as e:
             print(f"[ERROR] Skipping file {file}: {e}")
             traceback.print_exc()
 
-# ---- ここが追加：prob=0.0 列の統合（全 norm 横断の平均） ----
-combined_prob0 = {}  # combined_prob0[benefit] = 統合平均
-for benefit in benefits:
+# 試行間平均を作る: data_mean[norm][benefit_str][prob_str] = 平均値
+data_mean = defaultdict(lambda: defaultdict(dict))
+for norm, by_benefit in data_vals.items():
+    for benefit_str, by_prob in by_benefit.items():
+        for prob_str, vals in by_prob.items():
+            if len(vals) > 0:
+                data_mean[norm][benefit_str][prob_str] = float(np.mean(vals))
+            else:
+                data_mean[norm][benefit_str][prob_str] = np.nan
+
+# ---- 左端列（prob=0.00）の統合（全 norm 横断平均） ----
+combined_prob0 = {}  # combined_prob0[benefit_str] = 統合平均
+for b in benefits:
+    bkey = key_benefit(b)
     vals = []
     for norm in norms_target:
-        v = data[norm].get(benefit, {}).get(0.0, np.nan)
-        if not np.isnan(v):
+        v = data_mean[norm].get(bkey, {}).get("0.00", np.nan)
+        if not (isinstance(v, float) and np.isnan(v)):
             vals.append(v)
-    if len(vals) > 0:
-        combined_prob0[benefit] = float(np.mean(vals))
-    else:
-        combined_prob0[benefit] = np.nan  # 該当データが全く無い場合は NaN のまま
+    combined_prob0[bkey] = float(np.mean(vals)) if vals else np.nan
 
 # デバッグ表示（任意）
-print("[INFO] Combined prob=0.0 column (benefit -> mean across norms):")
+print("[INFO] Combined prob=0.00 column (benefit -> mean across norms):")
 for b in benefits:
-    print(f"  benefit={b}: {combined_prob0[b]}")
+    bkey = key_benefit(b)
+    print(f"  benefit={bkey}: {combined_prob0[bkey]}")
 
 # ヒートマップ描画
 def plot_heatmap(norm):
     grid = np.full((len(benefits), len(probs)), np.nan)
 
-    for bi, benefit in enumerate(benefits):
-        for pi, prob in enumerate(probs):
-            if prob == 0.0:
-                # 左端列だけ統合値を使用
-                val = combined_prob0.get(benefit, np.nan)
+    for bi, b in enumerate(benefits):
+        bkey = key_benefit(b)
+        for pi, p in enumerate(probs):
+            pkey = key_prob(p)
+            if pi == 0:
+                # 左端列だけ統合値を使用（prob=0.00）
+                val = combined_prob0.get(bkey, np.nan)
             else:
-                val = data[norm].get(benefit, {}).get(prob, np.nan)
-            # y 軸は上が大きな benefit になるよう反転格納
-            grid[len(benefits) - 1 - bi, pi] = val
+                val = data_mean[norm].get(bkey, {}).get(pkey, np.nan)
+            grid[len(benefits) - 1 - bi, pi] = val  # 上ほど benefit が大
 
     plt.figure(figsize=(16, 6), dpi=dpi)
     sns.heatmap(
@@ -98,12 +115,12 @@ def plot_heatmap(norm):
         cmap="Blues",
         vmin=0,
         vmax=1,
-        xticklabels=probs,
-        yticklabels=list(reversed(benefits)),
+        xticklabels=[f"{p:.2f}" for p in probs],
+        yticklabels=[f"{b:.1f}" for b in reversed(benefits)],
         linewidths=0.5 if draw_grid else 0,
         linecolor='gray' if draw_grid else None
     )
-    plt.title(f"Average Cooperation Rate (Norm: {norm})\n(Leftmost column uses prob=0.0 combined across norms)", fontsize=14)
+    plt.title(f"Average Cooperation Rate (Norm: {norm})\n(Leftmost column uses prob=0.00 combined across norms)", fontsize=14)
     plt.xlabel("Probability of Public Evaluation Use")
     plt.ylabel("Benefit")
     plt.tight_layout()
