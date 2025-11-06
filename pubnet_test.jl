@@ -245,16 +245,15 @@ end
         # --- ネットワーク構築 ---
         # network: 次数/人口の割合
         # 特殊値: 0.0 = 全員Public（非隣接扱い）, 1.0 = well-mixed（全隣接, Public不使用）
-        neighbors::Vector{Vector{Int}}
-        well_mixed = (network == 1.0)
+        well_mixed  = (network == 1.0)
         public_only = (network == 0.0)
 
-        if public_only
+        neighbors = if public_only
             # 全員Public：エッジなし（全員 非隣接）
-            neighbors = [Int[] for _ in 1:num_agent]
+            [Int[] for _ in 1:num_agent]
         elseif well_mixed
             # well-mixed：全員が全員を観察（全隣接）
-            neighbors = [ [ setdiff(1:num_agent, [i])... ] for i in 1:num_agent ]
+            [ [ j for j in 1:num_agent if j != i ] for i in 1:num_agent ]
         else
             # レギュラー（リング格子）
             k_raw = floor(Int, network * num_agent)
@@ -263,8 +262,9 @@ end
             if isodd(k)
                 k = k > 0 ? k - 1 : 0
             end
-            neighbors = build_regular_ring(num_agent, k)
+            build_regular_ring(num_agent, k)
         end
+
         neighbor_bits = neighbors_to_bitvectors(neighbors, num_agent)
 
         # --- 初期化 ---
