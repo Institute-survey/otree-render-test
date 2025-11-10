@@ -49,8 +49,7 @@ end
     const mutation_rate = 0.01         # 突然変異確率
     const simulation = 10              # シミュレーション回数
 
-    # 乱数は各プロセスで独立に初期化（シード固定したい場合は適宜設定）
-    Random.seed!()
+    Random.seed!()  # 各プロセスで独立初期化（必要なら値を与えて固定）
 
     # ========== 型定義 ==========
     mutable struct Agent
@@ -69,7 +68,6 @@ end
     normstring(v::Vector{Char}) = String(v)
 
     function new_agent(id::Int)
-        # 規範は G/B を長さ4でランダム
         norm = [rand(Bool) ? 'G' : 'B' for _ in 1:4]
         rep = fill('G', num_agent)
         rep[id] = 'G'
@@ -93,12 +91,11 @@ end
             return norm[2]
         elseif recipient_rep == 'B' && donor_action == 'C'
             return norm[3]
-        else # recipient_rep == 'B' && donor_action == 'D'
-            return norm[4]
+        else
+            return norm[4]  # recipient_rep == 'B' && donor_action == 'D'
         end
     end
 
-    # 役割割り当て：ランダム並べ替え→(i, i+1 mod N)
     function assign_roles(n::Int)
         perm = randperm(n)
         pairs = Vector{Tuple{Int,Int}}(undef, n)
@@ -110,7 +107,6 @@ end
         return pairs
     end
 
-    # 選択重み
     function calculate_selection_weights(agents::Vector{Agent})
         payoffs = [a.payoff for a in agents]
         allsame = true
@@ -139,7 +135,6 @@ end
         return [x/s for x in sq]
     end
 
-    # 重み付きサンプリング（1個）
     @inline function sample_index(weights::Vector{Float64})::Int
         r = rand()
         acc = 0.0
@@ -149,11 +144,11 @@ end
                 return i
             end
         end
-        return length(weights) # 端数のため
+        return length(weights)
     end
 
     # ==============================
-    # ネットワーク生成（今回の原因に無関係だがそのまま）
+    # ネットワーク生成
     # ==============================
     function build_regular_ring(N::Int, k::Int)
         neighbors = [Int[] for _ in 1:N]
@@ -195,17 +190,20 @@ end
     function run_simulation(params)
         error_rate_action, error_rate_evaluation, error_rate_public_evaluation, benefit_of_cooperation, network, public_norm_str, sim = params
 
-        # --- ネットワーク構築（略） ---
-        well_mixed  = (network == 1.0)
-        public_only = (network == 0.0)
+        # --- ネットワーク構築 ---
+        well_mixed  = (network == 1.0)   # 全員 私的評価（Public不使用）
+        public_only = (network == 0.0)   # 全員 Public コピー
+
         neighbors = if public_only
-            [Int[] for _ in 1:num_agent]
+            [Int[] for _ in 1:num_agent]  # 非隣接扱い
         elseif well_mixed
-            [ [ j for j in 1:num_agent if j != i ] for i in 1:num_agent ]
+            [ [ j for j in 1:num_agent if j != i ] for i in 1:num_agent ]  # 全隣接
         else
             k_raw = floor(Int, network * num_agent)
             k = clamp(k_raw, 0, num_agent - 2)
-            if isodd(k); k = k > 0 ? k - 1 : 0; end
+            if isodd(k)
+                k = k > 0 ? k - 1 : 0
+            end
             build_regular_ring(num_agent, k)
         end
         neighbor_bits = neighbors_to_bitvectors(neighbors, num_agent)
@@ -237,7 +235,7 @@ end
 
                     push!(action_records, (donor_id, recipient_id, action))
 
-                    # --- 評判更新（省略：元のまま） ---
+                    # --- 評判更新（Public 更新） ---
                     if !well_mixed
                         pr = public_institution.reputation[recipient_id]
                         public_institution.reputation[donor_id] =
@@ -248,20 +246,26 @@ end
                         end
                     end
 
-                    @inbounds for evaluator_id in 1:num_agent
-                        if evaluator_id == donor_id
-                            continue
-                        end
-                        if well_mixed
+                    # --- 観察者の更新（定数倍削減のため大域分岐） ---
+                    if well_mixed
+                        @inbounds for evaluator_id in 1:num_agent
+                            if evaluator_id == donor_id; continue; end
                             recipient_rep_e = agents[evaluator_id].reputation[recipient_id]
                             newrep = update_reputation_rule(agents[evaluator_id].norm, action, recipient_rep_e)
                             if rand() < error_rate_evaluation
                                 newrep = (newrep == 'G') ? 'B' : 'G'
                             end
                             agents[evaluator_id].reputation[donor_id] = newrep
-                        elseif public_only
-                            agents[evaluator_id].reputation[donor_id] = public_institution.reputation[donor_id]
-                        else
+                        end
+                    elseif public_only
+                        repval = public_institution.reputation[donor_id]
+                        @inbounds for evaluator_id in 1:num_agent
+                            if evaluator_id == donor_id; continue; end
+                            agents[evaluator_id].reputation[donor_id] = repval
+                        end
+                    else
+                        @inbounds for evaluator_id in 1:num_agent
+                            if evaluator_id == donor_id; continue; end
                             if neighbor_bits[donor_id][evaluator_id]
                                 recipient_rep_e = agents[evaluator_id].reputation[recipient_id]
                                 newrep = update_reputation_rule(agents[evaluator_id].norm, action, recipient_rep_e)
@@ -275,7 +279,7 @@ end
                         end
                     end
 
-                    # 協力率の集計（最後の20%期間）
+                    # 協力率の集計（最後の20%期間のみ）
                     if period > Int(floor(0.8 * num_periods))
                         interaction_count += 1
                         if action == 'C'
@@ -302,6 +306,11 @@ end
 
             # 規範分布の保存
             push!(norm_distribution, [copy(a.norm) for a in agents])
+
+            # 進捗（体感停止対策）
+            if generation % 50 == 0
+                @info "gen=$generation done" generation sim network public_norm_str
+            end
 
             # 次世代へ（選択）
             weights = calculate_selection_weights(agents)
@@ -330,7 +339,7 @@ end
         file_prefix_without_sim = "$(num_agent)_$(public_norm_str)_network$(network)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)_benefit$(benefit_of_cooperation)"
         file_prefix = file_prefix_without_sim * "_$(sim+1)"
 
-        # 規範分布CSV（従来どおり）
+        # 規範分布CSV（Simごと）
         try
             norm_file = "norm_distribution$(file_prefix).csv"
             open(norm_file, "w") do io
@@ -349,24 +358,21 @@ end
                 end
             end
         catch e
-            @warn "norm_distribution の書き込みに失敗しました。" exception=(e, catch_backtrace())
+            @warn "norm_distribution の書き込みに失敗" exception=(e, catch_backtrace())
         end
 
-        # ★ 追加：協力率CSV（Simごと個別、実行ディレクトリ直下）
-        #  -> 「別モデル」と同じ発想で、各シミュレーションの成果をその場で確実に落とす
+        # 協力率CSV（Simごと, 実行ディレクトリ直下）
         try
             coop_file = "cooperation_rates$(file_prefix).csv"
             open(coop_file, "w") do io
                 write(io, "Generation,CooperationRate\n")
                 for (gen, rate) in enumerate(cooperation_rates)
-                    write(io, string(gen))   # 1始まり（0始まりにしたい場合は gen-1）
-                    write(io, ",")
-                    write(io, string(rate))
-                    write(io, "\n")
+                    write(io, string(gen))   # 0始まりにしたい場合は gen-1
+                    write(io, ","); write(io, string(rate)); write(io, "\n")
                 end
             end
         catch e
-            @warn "cooperation_rates（Simごと）の書き込みに失敗しました。" exception=(e, catch_backtrace())
+            @warn "cooperation_rates（Simごと）の書き込みに失敗" exception=(e, catch_backtrace())
         end
 
         return Dict(
@@ -376,16 +382,13 @@ end
         )
     end
 
-    # 進捗ログ付き実行
-    function run_and_log(index_param, progress_log_path::String, total::Int)
+    # === ワーカー側ではファイルに書かず、ログ行の文字列だけ返す ===
+    function run_and_log(index_param)
         i, param = index_param
         result = run_simulation(param)
         fk = result["file_key"]
         sm = result["sim"]
-        open(progress_log_path, "a") do io
-            write(io, "[ $(i+1)/$total ] Finished: $(fk) (Sim $(sm))\n")
-        end
-        return result
+        return (result=result, logline="[ $(i+1) ] Finished: $(fk) (Sim $(sm))\n")
     end
 end # @everywhere
 
@@ -422,14 +425,21 @@ function main()
 
     total = length(params)
     idx_params = collect(enumerate(params))
-    const_progress = progress_log_path
-    const_total = total
 
-    results = pmap(idx_params) do ip
-        run_and_log(ip, const_progress, const_total)
+    # === pmap 実行：ワーカーはログ文字列を返すのみ ===
+    wrapped = pmap(idx_params) do ip
+        run_and_log(ip)
     end
 
-    # --- 結果の集約（横持ちCSVも生成：従来どおり） ---
+    # 結果／ログの抽出
+    results = [w.result for w in wrapped]
+    open(progress_log_path, "a") do io
+        for w in wrapped
+            write(io, w.logline)  # マスターだけがファイルに追記
+        end
+    end
+
+    # --- 結果の集約（同一セッティングで横持ちCSVを出力） ---
     grouped = Dict{String, Dict{String, Vector{Float64}}}()
     max_gen = 0
     for result in results
@@ -448,8 +458,7 @@ function main()
                 write(io, "Generation")
                 simnames = sort(collect(keys(simdict)))  # "Sim0","Sim1",...
                 for s in simnames
-                    write(io, ",")
-                    write(io, s)
+                    write(io, ","); write(io, s)
                 end
                 write(io, "\n")
                 for gen in 1:max_gen
@@ -457,14 +466,13 @@ function main()
                     for s in simnames
                         rates = simdict[s]
                         val = gen <= length(rates) ? rates[gen] : ""
-                        write(io, ",")
-                        write(io, string(val))
+                        write(io, ","); write(io, string(val))
                     end
                     write(io, "\n")
                 end
             end
         catch e
-            @warn "cooperation_rates（集計）の書き込みに失敗しました。" file=out exception=(e, catch_backtrace())
+            @warn "cooperation_rates（集約）の書き込みに失敗" file=out exception=(e, catch_backtrace())
         end
     end
 end
