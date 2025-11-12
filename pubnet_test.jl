@@ -1,14 +1,29 @@
 using Distributed
 using Random
 using Dates
+using Graphs
+using SparseArrays
+using LinearAlgebra
 
-# --- 並列ワーカーの用意 ---
+# -------- Parallel workers (bounded) --------
+const _MAX_WORKERS = min(max(1, Sys.CPU_THREADS ÷ 2), 8)
 if nprocs() == 1
-    addprocs()
+    addprocs(_MAX_WORKERS; exeflags="--heap-size-hint=2G")
+end
+
+@everywhere begin
+    using Random
+    using Graphs
+    using SparseArrays
+    using LinearAlgebra
+    try
+        LinearAlgebra.BLAS.set_num_threads(1)
+    catch
+    end
 end
 
 # =========================
-# ログ関数（マスターのみ）
+# Logging (master only)
 # =========================
 function save_simulation_log(script_path::String=abspath(PROGRAM_FILE), log_dir::String="logs")
     isdir(log_dir) || mkpath(log_dir)
@@ -25,7 +40,7 @@ function save_simulation_log(script_path::String=abspath(PROGRAM_FILE), log_dir:
                 src = read(script_path, String)
                 write(io, src)
             else
-                write(io, "# [Warn] script source not available in this context.\n")
+                write(io, "# [Warn] script source not available.\n")
             end
         catch
             write(io, "# [Warn] failed to read script source: $script_path\n")
@@ -39,39 +54,37 @@ function save_simulation_log(script_path::String=abspath(PROGRAM_FILE), log_dir:
 end
 
 @everywhere begin
-    using Random
+    # ========== Constants ==========
+    const num_agent = 400
+    const num_periods = Int(400)
+    const cost_of_cooperation = 1.0
+    const num_generations = 1000
+    const mutation_rate = 0.01
+    const simulation = 10
 
-    # ========== 初期値 ==========
-    const num_agent = 400              # エージェント数
-    const num_periods = Int(400)       # ピリオド数
-    const cost_of_cooperation = 1.0    # 協力コスト
-    const num_generations = 1000       # ジェネレーション数
-    const mutation_rate = 0.01         # 突然変異確率
-    const simulation = 10              # シミュレーション回数
+    Random.seed!()  # per-process RNG
 
-    Random.seed!()  # 各プロセスで独立初期化
-
-    # ========== 型定義 ==========
+    # ========== Types ==========
     mutable struct Agent
         id::Int
         payoff::Float64
-        norm::Vector{Char}           # 長さ4、'G'/'B'
-        reputation::Vector{Char}     # 長さ num_agent、'G'/'B'
+        norm::Vector{Char}           # length 4, 'G'/'B'
+        reputation::Vector{Char}     # length num_agent, 'G'/'B'
     end
 
     mutable struct PublicInstitution
-        norm::Vector{Char}           # 長さ4
-        reputation::Vector{Char}     # 長さ num_agent
+        norm::Vector{Char}           # length 4
+        reputation::Vector{Char}     # length num_agent
     end
 
-    # ========== ユーティリティ ==========
+    # ========== Utils ==========
     normstring(v::Vector{Char}) = String(v)
 
     function new_agent(id::Int)
         norm = [rand(Bool) ? 'G' : 'B' for _ in 1:4]
         rep = fill('G', num_agent)
         rep[id] = 'G'
-        Agent(id, 0.0, norm, rep)
+        return Agent(id, 0.0, norm, rep)
     end
 
     function decide_action(agent::Agent, recipient_rep::Char)::Char
@@ -92,7 +105,7 @@ end
         elseif recipient_rep == 'B' && donor_action == 'C'
             return norm[3]
         else
-            return norm[4]
+            return norm[4]  # recipient_rep == 'B' && donor_action == 'D'
         end
     end
 
@@ -147,64 +160,73 @@ end
         return length(weights)
     end
 
-    # ==============================
-    # ネットワーク生成
-    # ==============================
-    function build_regular_ring(N::Int, k::Int)
-        neighbors = [Int[] for _ in 1:N]
-        if k <= 0
-            return neighbors
-        end
-        half = k ÷ 2
-        @inbounds for i in 1:N
-            for s in 1:half
-                j1 = ((i - 1 + s) % N) + 1
-                j2 = ((i - 1 - s) % N) + 1
-                if j1 != i
-                    push!(neighbors[i], j1); push!(neighbors[j1], i)
-                end
-                if j2 != i
-                    push!(neighbors[i], j2); push!(neighbors[j2], i)
-                end
-            end
-        end
-        @inbounds for i in 1:N
-            neighbors[i] = unique(neighbors[i])
-        end
-        return neighbors
-    end
-
-    function neighbors_to_bitvectors(neighbors::Vector{Vector{Int}}, N::Int)
-        bits = [falses(N) for _ in 1:N]
-        @inbounds for i in 1:N
-            for j in neighbors[i]
-                bits[i][j] = true
-            end
-        end
-        return bits
-    end
-
-    # 1条件のシミュレーション本体
-    function run_simulation(params)
-        error_rate_action, error_rate_evaluation, error_rate_public_evaluation, benefit_of_cooperation, network, public_norm_str, sim = params
-
-        # --- ネットワーク構築 ---
-        well_mixed  = (network == 1.0)   # 全員 私的評価（Public不使用）
-        public_only = (network == 0.0)   # 全員 Public コピー
-
-        neighbors = if public_only
-            [Int[] for _ in 1:num_agent]  # 非隣接扱い
-        elseif well_mixed
-            [ [ j for j in 1:num_agent if j != i ] for i in 1:num_agent ]  # 全隣接
+    # ========== Graph construction (Graphs.jl) ==========
+    """
+    build_observer_graph(N, network):
+      0.0 -> empty graph (everyone public)
+      1.0 -> nothing (well-mixed, no graph used)
+      else -> regular ring with degree k = floor(network*N) (even, <= N-2)
+    """
+    function build_observer_graph(N::Int, network::Float64)
+        if network == 0.0
+            return SimpleGraph(N)        # empty graph
+        elseif network == 1.0
+            return nothing               # not used in well-mixed
         else
-            k_raw = floor(Int, network * num_agent)
-            k = clamp(k_raw, 0, num_agent - 2)
+            k_raw = floor(Int, network * N)
+            k = clamp(k_raw, 0, N - 2)
             if isodd(k); k = k > 0 ? k - 1 : 0; end
-            build_regular_ring(num_agent, k)
+            if k == 0
+                return SimpleGraph(N)
+            end
+            g = SimpleGraph(N)
+            half = k ÷ 2
+            @inbounds for i in 1:N
+                # add edges only once (i < j) to avoid duplicates
+                for s in 1:half
+                    j = ((i - 1 + s) % N) + 1
+                    if i < j
+                        add_edge!(g, i, j)
+                    end
+                end
+            end
+            return g
         end
-        neighbor_bits = neighbors_to_bitvectors(neighbors, num_agent)
+    end
 
-        # --- 初期化 ---
+    # ========== Warm-up (avoid simultaneous JIT spikes) ==========
+    function _warmup_once()
+        N = 8
+        _ = assign_roles(N)
+        _ = update_reputation_rule(['G','B','G','B'], 'C', 'G')
+        g1 = build_observer_graph(N, 0.0)
+        g2 = build_observer_graph(N, 0.5)
+        g3 = build_observer_graph(N, 1.0)
+        if g2 !== nothing
+            _ = adjacency_matrix(g2)
+        end
+        a = Agent(1, 0.0, ['G','B','G','B'], fill('G', N))
+        a.reputation[2] = 'G'
+        _ = decide_action(a, a.reputation[2])
+        return nothing
+    end
+
+    # ========== Main simulation of one setting ==========
+    function run_simulation(params)
+        error_rate_action, error_rate_evaluation, error_rate_public_evaluation,
+        benefit_of_cooperation, network, public_norm_str, sim = params
+
+        well_mixed  = (network == 1.0)  # private only
+        public_only = (network == 0.0)  # public copy only
+
+        # Graph only when needed
+        g = build_observer_graph(num_agent, network)
+        A = nothing
+        if !(well_mixed || public_only)
+            A = adjacency_matrix(g)  # SparseMatrixCSC{Int,Int}
+        end
+
+        # Initialization
         agents = [new_agent(i) for i in 1:num_agent]
         public_institution = PublicInstitution(collect(public_norm_str), fill('G', num_agent))
 
@@ -231,7 +253,7 @@ end
 
                     push!(action_records, (donor_id, recipient_id, action))
 
-                    # --- 公的評価の更新（well-mixed 以外のみ） ---
+                    # Public update (disabled in well-mixed)
                     if !well_mixed
                         pr = public_institution.reputation[recipient_id]
                         public_institution.reputation[donor_id] =
@@ -242,9 +264,8 @@ end
                         end
                     end
 
-                    # --- 観察者（evaluator）の更新：隣接か否かで決める ---
+                    # Observers update: adjacent => private / non-adjacent => public
                     if well_mixed
-                        # 全員 私的評価
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
                             recipient_rep_e = agents[evaluator_id].reputation[recipient_id]
@@ -255,17 +276,16 @@ end
                             agents[evaluator_id].reputation[donor_id] = newrep
                         end
                     elseif public_only
-                        # 全員 公的評価コピー
                         repval = public_institution.reputation[donor_id]
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
                             agents[evaluator_id].reputation[donor_id] = repval
                         end
                     else
-                        # レギュラー：隣接→私的評価、非隣接→公的評価コピー
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
-                            if neighbor_bits[donor_id][evaluator_id]
+                            # adjacency check via sparse matrix
+                            if A[donor_id, evaluator_id] != 0
                                 recipient_rep_e = agents[evaluator_id].reputation[recipient_id]
                                 newrep = update_reputation_rule(agents[evaluator_id].norm, action, recipient_rep_e)
                                 if rand() < error_rate_evaluation
@@ -278,7 +298,7 @@ end
                         end
                     end
 
-                    # 協力率の集計（最後の20%期間のみ）
+                    # Cooperation rate tally (last 20% periods)
                     if period > Int(floor(0.8 * num_periods))
                         interaction_count += 1
                         if action == 'C'
@@ -287,7 +307,7 @@ end
                     end
                 end
 
-                # === 利得の一括適用 ===
+                # Apply payoffs in batch
                 for rec in action_records
                     donor_id = rec[1]::Int
                     recipient_id = rec[2]::Int
@@ -299,41 +319,36 @@ end
                 end
             end
 
-            # 世代の協力率
+            # Generation cooperation rate
             coop_rate = interaction_count == 0 ? 0.0 : cooperation_count / interaction_count
             push!(cooperation_rates, coop_rate)
 
-            # 規範分布の保存
+            # Save norms for this generation
             push!(norm_distribution, [copy(a.norm) for a in agents])
 
-            # 次世代へ（選択）
+            # Selection -> next gen
             weights = calculate_selection_weights(agents)
             new_agents = Vector{Agent}(undef, num_agent)
             for idx in 1:num_agent
                 p1 = agents[sample_index(weights)]
                 p2 = agents[sample_index(weights)]
                 new_norm = Vector{Char}(undef, 4)
-                @inbounds for g in 1:4
-                    inherited = rand(Bool) ? p1.norm[g] : p2.norm[g]
-                    if rand() < mutation_rate
-                        new_norm[g] = (inherited == 'G') ? 'B' : 'G'
-                    else
-                        new_norm[g] = inherited
-                    end
+                @inbounds for gidx in 1:4
+                    inherited = rand(Bool) ? p1.norm[gidx] : p2.norm[gidx]
+                    new_norm[gidx] = (rand() < mutation_rate) ? ((inherited == 'G') ? 'B' : 'G') : inherited
                 end
-                rep = fill('G', num_agent)
-                rep[idx] = 'G'
+                rep = fill('G', num_agent); rep[idx] = 'G'
                 new_agents[idx] = Agent(idx, 0.0, new_norm, rep)
             end
             agents = new_agents
             public_institution.reputation .= 'G'
         end
 
-        # === 出力（norm_distribution は各Simごと、cooperation_rates は返すのみ） ===
+        # Filenames (same convention)
         file_key = "$(num_agent)_$(public_norm_str)_network$(network)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)_benefit$(benefit_of_cooperation)"
         file_prefix = file_key * "_$(sim+1)"
 
-        # 規範分布CSV（Simごと／実行ディレクトリ）
+        # norm_distribution per Sim
         norm_file = "norm_distribution$(file_prefix).csv"
         open(norm_file, "w") do io
             write(io, "Generation")
@@ -350,7 +365,7 @@ end
             end
         end
 
-        # cooperation rates はマスターで集約出力するため返す
+        # return cooperation rates to master (aggregated output only)
         return Dict(
             "file_key" => file_key,
             "sim" => sim,
@@ -358,23 +373,34 @@ end
         )
     end
 
-    # ワーカーはログ/ファイルを書かない（戻り値のみ）
+    # Worker runner: no file/log writes here
     function run_and_collect(index_param)
         i, param = index_param
         result = run_simulation(param)
         return (i=i, result=result)
     end
-end # @everywhere
+end # @everywhere end
 
-# --- メイン ---
+# ---- Sequential warm-up on each worker (avoid simultaneous JIT) ----
+function _warm_all_workers_sequential()
+    for pid in workers()
+        remotecall_fetch(_warmup_once, pid)
+        sleep(0.05)
+    end
+end
+
+# =========================
+# Main
+# =========================
 function main()
     progress_log_path = save_simulation_log()
+    _warm_all_workers_sequential()
 
     error_rates_self = [0.001]
     error_rates_public = [0.001]
     benefit_values = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
 
-    # 0.0=全員Public, 1.0=well-mixed (Public未使用)
+    # 0.0=all public, 1.0=well-mixed (no public)
     network_values = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5,
                       0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
 
@@ -399,12 +425,12 @@ function main()
 
     idx_params = collect(enumerate(params))
 
-    # 並列実行：ワーカーは戻り値のみ
-    wrapped = pmap(idx_params) do ip
+    # Run in parallel with gentle batching
+    wrapped = pmap(idx_params; batch_size=1) do ip
         run_and_collect(ip)
     end
 
-    # 進捗ログ（マスターのみが最後に書く）
+    # progress log (master only)
     open(progress_log_path, "a") do io
         for w in wrapped
             fk = w.result["file_key"]; sm = w.result["sim"]
@@ -412,7 +438,7 @@ function main()
         end
     end
 
-    # === cooperation rate の「同一セッティングごと」集約（横持ち1本のみ出力） ===
+    # Aggregate cooperation rates per setting (one CSV per setting)
     grouped = Dict{String, Dict{String, Vector{Float64}}}()  # key => "SimX" => rates
     max_gen = 0
     for w in wrapped
@@ -426,7 +452,6 @@ function main()
     end
 
     for (key, simdict) in grouped
-        # 小数点含みの安全化（必要なら）
         safe_key = replace(key, '.' => 'p')
         out = "cooperation_rates_$(safe_key).csv"
         try
@@ -448,9 +473,20 @@ function main()
                 end
             end
         catch e
-            # 他条件の出力は継続
-            @warn "cooperation_rates 集約の書き込みに失敗" file=out exception=(e, catch_backtrace())
+            @warn "Failed to write aggregated csv" file=out exception=(e, catch_backtrace())
         end
+    end
+
+    # Graceful shutdown (avoid concurrent teardown)
+    try
+        GC.gc()
+        for pid in workers()
+            rmprocs(pid; waitfor=5)
+            sleep(0.1)
+        end
+        GC.gc()
+    catch e
+        @warn "graceful shutdown failed" exception=(e, catch_backtrace())
     end
 end
 
