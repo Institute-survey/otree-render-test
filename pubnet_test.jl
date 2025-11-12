@@ -96,7 +96,6 @@ end
         end
     end
 
-    # 役割割り当て：ランダム並べ替え→(i, i+1 mod N)
     function assign_roles(n::Int)
         perm = randperm(n)
         pairs = Vector{Tuple{Int,Int}}(undef, n)
@@ -108,7 +107,6 @@ end
         return pairs
     end
 
-    # 選択重み
     function calculate_selection_weights(agents::Vector{Agent})
         payoffs = [a.payoff for a in agents]
         allsame = true
@@ -233,7 +231,7 @@ end
 
                     push!(action_records, (donor_id, recipient_id, action))
 
-                    # --- Public の更新 ---
+                    # --- 公的評価の更新（well-mixed 以外のみ） ---
                     if !well_mixed
                         pr = public_institution.reputation[recipient_id]
                         public_institution.reputation[donor_id] =
@@ -244,8 +242,9 @@ end
                         end
                     end
 
-                    # --- 観察者の更新（大域分岐） ---
+                    # --- 観察者（evaluator）の更新：隣接か否かで決める ---
                     if well_mixed
+                        # 全員 私的評価
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
                             recipient_rep_e = agents[evaluator_id].reputation[recipient_id]
@@ -256,12 +255,14 @@ end
                             agents[evaluator_id].reputation[donor_id] = newrep
                         end
                     elseif public_only
+                        # 全員 公的評価コピー
                         repval = public_institution.reputation[donor_id]
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
                             agents[evaluator_id].reputation[donor_id] = repval
                         end
                     else
+                        # レギュラー：隣接→私的評価、非隣接→公的評価コピー
                         @inbounds for evaluator_id in 1:num_agent
                             if evaluator_id == donor_id; continue; end
                             if neighbor_bits[donor_id][evaluator_id]
@@ -328,10 +329,11 @@ end
             public_institution.reputation .= 'G'
         end
 
-        # === 出力（norm_distribution は従来どおり Simごと, cooperation_rate は出さない） ===
+        # === 出力（norm_distribution は各Simごと、cooperation_rates は返すのみ） ===
         file_key = "$(num_agent)_$(public_norm_str)_network$(network)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)_benefit$(benefit_of_cooperation)"
         file_prefix = file_key * "_$(sim+1)"
 
+        # 規範分布CSV（Simごと／実行ディレクトリ）
         norm_file = "norm_distribution$(file_prefix).csv"
         open(norm_file, "w") do io
             write(io, "Generation")
@@ -348,7 +350,7 @@ end
             end
         end
 
-        # cooperation_rates は return でマスターに渡し、マスターが「まとめて1本」出力する
+        # cooperation rates はマスターで集約出力するため返す
         return Dict(
             "file_key" => file_key,
             "sim" => sim,
@@ -356,7 +358,7 @@ end
         )
     end
 
-    # === ワーカーはログを書かない・戻り値のみ ===
+    # ワーカーはログ/ファイルを書かない（戻り値のみ）
     function run_and_collect(index_param)
         i, param = index_param
         result = run_simulation(param)
@@ -397,12 +399,12 @@ function main()
 
     idx_params = collect(enumerate(params))
 
-    # 並列実行（ワーカーは戻り値のみ）
+    # 並列実行：ワーカーは戻り値のみ
     wrapped = pmap(idx_params) do ip
         run_and_collect(ip)
     end
 
-    # --- 進捗ログ（マスターのみ書く／同時append回避） ---
+    # 進捗ログ（マスターのみが最後に書く）
     open(progress_log_path, "a") do io
         for w in wrapped
             fk = w.result["file_key"]; sm = w.result["sim"]
@@ -410,7 +412,7 @@ function main()
         end
     end
 
-    # --- cooperation rate の「同一セッティングごと」集約出力（これのみ！） ---
+    # === cooperation rate の「同一セッティングごと」集約（横持ち1本のみ出力） ===
     grouped = Dict{String, Dict{String, Vector{Float64}}}()  # key => "SimX" => rates
     max_gen = 0
     for w in wrapped
@@ -424,19 +426,17 @@ function main()
     end
 
     for (key, simdict) in grouped
-        # 小数点が含まれる環境での安全性を上げる（例: network=0.05）
+        # 小数点含みの安全化（必要なら）
         safe_key = replace(key, '.' => 'p')
         out = "cooperation_rates_$(safe_key).csv"
         try
             open(out, "w") do io
-                # ヘッダ
                 write(io, "Generation")
                 simnames = sort(collect(keys(simdict)))  # "Sim0","Sim1",...
                 for s in simnames
                     write(io, ","); write(io, s)
                 end
                 write(io, "\n")
-                # 行
                 for gen in 1:max_gen
                     write(io, string(gen))
                     for s in simnames
@@ -448,7 +448,7 @@ function main()
                 end
             end
         catch e
-            # 例外があっても他の条件の出力は続行
+            # 他条件の出力は継続
             @warn "cooperation_rates 集約の書き込みに失敗" file=out exception=(e, catch_backtrace())
         end
     end
