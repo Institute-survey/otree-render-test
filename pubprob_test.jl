@@ -68,13 +68,18 @@ end
     # ========== ユーティリティ ==========
     normstring(v::Vector{Char}) = String(v)
 
+    function random_reputation()
+        return [rand(Bool) ? 'G' : 'B' for _ in 1:num_agent]
+    end
+
     function new_agent(id::Int)
         # 規範は G/B を長さ4でランダム
         norm = [rand(Bool) ? 'G' : 'B' for _ in 1:4]
-        rep = fill('G', num_agent)
-        rep[id] = 'G'
+        # 評判ベクトルも全員分 G/B ランダム
+        rep = random_reputation()
         Agent(id, 0.0, norm, rep)
     end
+
 
     function decide_action(agent::Agent, recipient_rep::Char)::Char
         ns = normstring(agent.norm)
@@ -158,7 +163,10 @@ end
         error_rate_action, error_rate_evaluation, error_rate_public_evaluation, benefit_of_cooperation, probability, public_norm_str, sim = params
         # 初期化
         agents = [new_agent(i) for i in 1:num_agent]
-        public_institution = PublicInstitution(collect(public_norm_str), fill('G', num_agent))
+        public_institution = PublicInstitution(
+            collect(public_norm_str),
+            random_reputation()
+        )
 
         cooperation_rates = Vector{Float64}()
         norm_distribution = Vector{Vector{Vector{Char}}}()  # genごとの全agentのnorm
@@ -218,7 +226,7 @@ end
                     end
 
                     # 協力率の集計（最後の20%期間）
-                    if period >= Int(floor(0.8 * num_periods))
+                    if period > Int(floor(0.8 * num_periods))
                         interaction_count += 1
                         if action == 'C'
                             cooperation_count += 1
@@ -260,12 +268,14 @@ end
                         new_norm[g] = inherited
                     end
                 end
-                rep = fill('G', num_agent)
-                rep[idx] = 'G'
+                # 次世代エージェントの初期評判も G/B ランダム
+                rep = random_reputation()
                 new_agents[idx] = Agent(idx, 0.0, new_norm, rep)
             end
             agents = new_agents
-            public_institution.reputation .= 'G'
+
+            # 公的機関の評判も世代ごとに G/B ランダムにリセット
+            public_institution.reputation = random_reputation()
         end
 
         # ファイル名キーの作成
@@ -318,8 +328,8 @@ function main()
     # ログはマスターでのみ作成
     progress_log_path = save_simulation_log()
 
-    error_rates_self = [0.001]
-    error_rates_public = [0.001]
+    error_rates_self = [0.01]
+    error_rates_public = [0.01]
     benefit_values = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
     probability_values = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
     public_norms = ["GBBG", "GBGB", "GBGG", "GBBB"]
