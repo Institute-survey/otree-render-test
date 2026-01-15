@@ -96,15 +96,15 @@ end
     end
 
     # ====== 変動コスト・ベネフィット（今回の修正点） ======
-    # 協力（C）の時のドナーにかかるコスト：-5〜+5（整数一様）
-    # 非協力（D）の時のドナーにかかるコスト：0〜+5（整数一様）
+    # 協力（C）の時のドナーにかかるコスト：0〜+5（整数一様）
+    # 非協力（D）の時のドナーにかかるコスト：-5~0（整数一様）
     # 協力（C）の時のレシピエントにわたるベネフィット：1〜+5（整数一様）
     # 非協力（D）の時のレシピエントにわたるベネフィット：-5〜0（整数一様）
     @inline function draw_donor_cost(action::Char)::Float64
         if action == 'C'
-            return Float64(rand(-5:5))
+            return Float64(rand(-0:5))
         else
-            return Float64(rand(0:5))
+            return Float64(rand(-5:0))
         end
     end
 
