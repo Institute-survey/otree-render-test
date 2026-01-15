@@ -108,16 +108,16 @@ end
         end
     end
 
-@inline function draw_recipient_benefit(action::Char, benefit_base::Int, benefit_multiplier::Float64)::Float64
-    if action == 'C'
-        # 協力ベネフィット
-        benefit_base = rand(1:5)
-        return Float64(benefit_base) * benefit_multiplier
-    else
-        # 非協力ベネフィット：-5〜0（整数一様）
-        return Float64(rand(-5:0))
+    @inline function draw_recipient_benefit(action::Char, benefit_base::Int, benefit_multiplier::Float64)::Float64
+        if action == 'C'
+            # 協力ベネフィット
+            benefit_base = rand(1:5)
+            return Float64(benefit_base) * benefit_multiplier
+        else
+            # 非協力ベネフィット：-5〜0（整数一様）
+            return Float64(rand(-5:0))
+        end
     end
-end
 
     # 役割割り当て：ランダム並べ替え→(i, i+1 mod N)
     function assign_roles(n::Int)
