@@ -108,13 +108,16 @@ end
         end
     end
 
-    @inline function draw_recipient_benefit(action::Char)::Float64
-        if action == 'C'
-            return Float64(rand(1:5))
-        else
-            return Float64(rand(-5:0))
-        end
+@inline function draw_recipient_benefit(action::Char, benefit_base::Int, benefit_multiplier::Float64)::Float64
+    if action == 'C'
+        # 協力ベネフィット
+        benefit_base = rand(1:5)
+        return Float64(benefit_base) * benefit_multiplier
+    else
+        # 非協力ベネフィット：-5〜0（整数一様）
+        return Float64(rand(-5:0))
     end
+end
 
     # 役割割り当て：ランダム並べ替え→(i, i+1 mod N)
     function assign_roles(n::Int)
@@ -173,7 +176,7 @@ end
     # 1条件のシミュレーション本体
     function run_simulation(params)
         # benefit_of_cooperation は廃止（変動にしたため）
-        error_rate_action, error_rate_evaluation, error_rate_public_evaluation, probability, public_norm_str, sim = params
+        error_rate_action, error_rate_evaluation, error_rate_public_evaluation, benefit_multiplier, probability, public_norm_str, sim = params
 
         # 初期化
         agents = [new_agent(i) for i in 1:num_agent]
@@ -207,7 +210,7 @@ end
 
                     # 今回の修正：行動ごとにコスト・ベネフィットを乱数で決めて記録
                     dcost = draw_donor_cost(action)
-                    rben  = draw_recipient_benefit(action)
+                    rben  = draw_recipient_benefit(action, benefit_multiplier)
                     push!(action_records, (donor_id, recipient_id, action, dcost, rben))
 
                     # --- 評判更新（即時） ---
@@ -291,7 +294,7 @@ end
         end
 
         # ファイル名キーの作成（benefit は廃止）
-        file_prefix_without_sim = "$(num_agent)_$(public_norm_str)_probability$(probability)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)"
+        file_prefix_without_sim = "$(num_agent)_$(public_norm_str)_probability$(probability)" * "_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)" * "_mult$(benefit_multiplier)"
         file_prefix = file_prefix_without_sim * "_$(sim+1)"
 
         # 規範分布CSVの保存
@@ -339,21 +342,24 @@ function main()
     # ログはマスターでのみ作成
     progress_log_path = save_simulation_log()
 
-    error_rates_self = [0.001, 0.01, 0.05]
-    error_rates_public = [0.001]
+    error_rates_self = [0.0, 0.001, 0.01, 0.05]
+    error_rates_public = [0.0]
     probability_values = [0.0]
+    benefit_multiplier_values = [1.0, 2.0, 3.0, 4.0, 5.0]
     public_norms = ["GBBG"]
 
     # params: (error_rate_action, error_rate_evaluation, error_rate_public_evaluation, probability, public_norm, sim)
-    params = Vector{NTuple{6,Any}}()
+    params = Vector{NTuple{7,Any}}()
     for error_rate_action in error_rates_self
         error_rate_evaluation = error_rate_action
         for error_rate_public_evaluation in error_rates_public
-            for probability in probability_values
-                for public_norm in public_norms
-                    for sim in 0:(simulation-1)
-                        push!(params, (error_rate_action, error_rate_evaluation, error_rate_public_evaluation,
-                                       probability, public_norm, sim))
+            for benefit_multiplier in benefit_multiplier_values
+                for probability in probability_values
+                    for public_norm in public_norms
+                        for sim in 0:(simulation-1)
+                            push!(params, (error_rate_action, error_rate_evaluation, error_rate_public_evaluation,
+                                        benefit_multiplier, probability, public_norm, sim))
+                        end
                     end
                 end
             end
