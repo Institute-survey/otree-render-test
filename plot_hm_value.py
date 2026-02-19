@@ -29,39 +29,34 @@ pattern = re.compile(
 data_vals = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
 # 探索・集計（julia* ディレクトリをすべて対象）
-for subdir in os.listdir(base_dir):
-    subpath = os.path.join(base_dir, subdir)
-    if not os.path.isdir(subpath) or not subdir.startswith("julia"):
-        continue
+files = glob(os.path.join(base_dir, "cooperation_rates_400_*.csv"))
 
-    files = glob(os.path.join(subpath, "cooperation_rates_400_*.csv"))
-    for file in files:
-        try:
-            filename = os.path.basename(file)
-            match = pattern.match(filename)
-            if not match:
-                continue
+for file in files:
+    try:
+        filename = os.path.basename(file)
+        match = pattern.match(filename)
+        if not match:
+            continue
 
-            norm, prob, benefit = match.groups()
-            if norm not in norms_target:
-                continue
+        norm, prob, benefit = match.groups()
+        if norm not in norms_target:
+            continue
 
-            prob_str = key_prob(prob)
-            benefit_str = key_benefit(benefit)
+        prob_str = key_prob(prob)
+        benefit_str = key_benefit(benefit)
 
-            df = pd.read_csv(file)
-            df.columns = [c.strip() for c in df.columns]
+        df = pd.read_csv(file)
+        df.columns = [c.strip() for c in df.columns]
 
-            # 後半100世代平均（Sim0〜Sim9）
-            df_last = df[(df["Generation"] >= 902) & (df["Generation"] <= 1001)]
-            sim_cols = [col for col in df_last.columns if col.startswith("Sim")]
-            mean_val = df_last[sim_cols].mean(axis=0).mean()
+        df_last = df[(df["Generation"] >= 902) & (df["Generation"] <= 1001)]
+        sim_cols = [col for col in df_last.columns if col.startswith("Sim")]
+        mean_val = df_last[sim_cols].mean(axis=0).mean()
 
-            data_vals[norm][benefit_str][prob_str].append(float(mean_val))
+        data_vals[norm][benefit_str][prob_str].append(float(mean_val))
 
-        except Exception as e:
-            print(f"[ERROR] Skipping file {file}: {e}")
-            traceback.print_exc()
+    except Exception as e:
+        print(f"[ERROR] Skipping file {file}: {e}")
+        traceback.print_exc()
 
 # 試行間平均: data_mean[norm][benefit_str][prob_str] = mean
 data_mean = defaultdict(lambda: defaultdict(dict))
