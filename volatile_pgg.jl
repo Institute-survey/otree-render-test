@@ -1,3 +1,4 @@
+#!/usr/bin/env julia
 using Distributed
 
 function print_help()
@@ -106,7 +107,6 @@ adjust_workers!(TARGET_WORKERS)
 @everywhere begin
     using Random
     using Statistics
-    using Printf
 
     const GROUP_SIZE = 4
     const BASE_ENDOWMENT = 100.0
@@ -180,18 +180,20 @@ adjust_workers!(TARGET_WORKERS)
         series::Vector{Float64}
     end
 
+    format_one_decimal(value::Float64) = string(round(value; digits = 1))
+
     function condition_id(cond::Condition)
         if cond.condition_type == "baseline"
             return "baseline"
         end
         earned_label = cond.earned ? "earned" : "not_earned"
-        cwi = cond.earned ? @sprintf("%.1f", cond.cost_weight_increase) : "na"
+        cwi = cond.earned ? format_one_decimal(cond.cost_weight_increase) : "na"
         grat = cond.earned ? string(cond.gratitude_steps) : "na"
         return string(
-            "rho_", @sprintf("%.1f", cond.rho),
+            "rho_", format_one_decimal(cond.rho),
             "__sigma_", Int(cond.sigma_e),
-            "__p0_", @sprintf("%.1f", cond.base_error_prob),
-            "__alpha_", @sprintf("%.1f", cond.error_sensitivity),
+            "__p0_", format_one_decimal(cond.base_error_prob),
+            "__alpha_", format_one_decimal(cond.error_sensitivity),
             "__err_", cond.error_mode,
             "__", earned_label,
             "__cost_", cwi,
