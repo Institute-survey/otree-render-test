@@ -26,7 +26,7 @@ function extract_option_value(argv::Vector{String}, i::Int, flag::String)
         i == length(argv) && error("Missing value after $(flag)")
         return argv[i + 1], i + 1
     elseif startswith(arg, prefix)
-        return argv[length(flag) + 2:end], i
+        return arg[length(flag) + 2:end], i
     else
         error("Unexpected parser state for $(flag)")
     end
@@ -224,7 +224,9 @@ adjust_workers!(TARGET_WORKERS)
     end
 
     action_grid_for_endowment(endowment::Float64) = collect(range(0.0; stop = endowment, length = ACTION_LEVELS))
+
     nearest_index(values::Vector{Float64}, target::Float64) = findmin(abs.(values .- target))[2]
+
     clip_index(index::Int) = max(1, min(ACTION_LEVELS, index))
 
     function generate_group_endowments(rounds::Int, rho::Float64, sigma_e::Float64, rng::AbstractRNG)
@@ -258,10 +260,10 @@ adjust_workers!(TARGET_WORKERS)
 
         for t in 1:rounds
             current_endowment = endowments[t]
-            total_contribution = float(sum(current_contributions))
+            total_contribution = sum(current_contributions)
             share_from_others = MPCR .* (total_contribution .- current_contributions)
 
-            mean_rates[t] = float(mean(current_contributions ./ current_endowment))
+            mean_rates[t] = mean(current_contributions ./ current_endowment)
             marginal_estimates .+= ALPHA .* (target_marginal .- marginal_estimates)
 
             if t == rounds
@@ -277,12 +279,12 @@ adjust_workers!(TARGET_WORKERS)
             p_error = min(1.0, condition.base_error_prob + condition.error_sensitivity * volatility)
 
             for i in 1:GROUP_SIZE
-                if marginal_estimates[i] > 0
-                    direction = 1
+                direction = if marginal_estimates[i] > 0
+                    1
                 elseif marginal_estimates[i] < 0
-                    direction = -1
+                    -1
                 else
-                    direction = 0
+                    0
                 end
 
                 if condition.error_mode != "none" && rand(rng) < p_error
@@ -322,6 +324,7 @@ adjust_workers!(TARGET_WORKERS)
 
     function build_tasks(conditions::Vector{Condition}, groups::Int, rounds::Int, base_seed::Int)
         tasks = TaskSpec[]
+        sizehint!(tasks, length(conditions) * groups)
         for (condition_index, cond) in enumerate(conditions)
             cid = condition_id(cond)
             for group_id in 1:groups
@@ -351,6 +354,7 @@ adjust_workers!(TARGET_WORKERS)
 
     function wide_rows(series_list::Vector{Vector{Float64}}, rounds::Int)
         rows = Vector{Vector{Any}}()
+        sizehint!(rows, length(series_list))
         for (group_index, series) in enumerate(series_list)
             row = Any[group_index]
             for r in 1:rounds
@@ -363,6 +367,7 @@ adjust_workers!(TARGET_WORKERS)
 
     function add_metadata_rows(df_rows::Vector{Vector{Any}}, meta::Dict{String,Any})
         out_rows = Vector{Vector{Any}}()
+        sizehint!(out_rows, length(df_rows))
         for row in df_rows
             base = Any[
                 meta["condition_id"],
@@ -384,8 +389,7 @@ adjust_workers!(TARGET_WORKERS)
         return out_rows
     end
 
-    function write_outputs(output_dir::AbstractString,
-                           conditions::Vector{Condition},
+    function write_outputs(output_dir::AbstractString, conditions::Vector{Condition},
                            cooperation_by_condition::Dict{String,Vector{Vector{Float64}}},
                            endowment_by_condition::Dict{String,Vector{Vector{Float64}}},
                            rounds::Int)
@@ -494,12 +498,8 @@ adjust_workers!(TARGET_WORKERS)
     end
 end
 
-function run_all_conditions(; output_dir::AbstractString,
-                             groups::Int,
-                             rounds::Int,
-                             seed::Int,
-                             include_baseline::Bool,
-                             max_conditions::Union{Nothing,Int})
+function run_all_conditions(; output_dir::AbstractString, groups::Int, rounds::Int, seed::Int,
+                             include_baseline::Bool, max_conditions::Union{Nothing,Int})
     mkpath(output_dir)
 
     conditions = build_conditions(include_baseline = include_baseline)
@@ -514,8 +514,8 @@ function run_all_conditions(; output_dir::AbstractString,
     endowment_by_condition = Dict{String,Vector{Vector{Float64}}}()
     for cond in conditions
         cid = condition_id(cond)
-        cooperation_by_condition[cid] = [Float64[] for _ in 1:groups]
-        endowment_by_condition[cid] = [Float64[] for _ in 1:groups]
+        cooperation_by_condition[cid] = [Vector{Float64}() for _ in 1:groups]
+        endowment_by_condition[cid] = [Vector{Float64}() for _ in 1:groups]
     end
 
     completed = Ref(0)
@@ -558,11 +558,11 @@ function run_all_conditions(; output_dir::AbstractString,
 
     write_outputs(output_dir, conditions, cooperation_by_condition, endowment_by_condition, rounds)
 
-    println("Saved manifest to: $(joinpath(output_dir, \"manifest_conditions.csv\"))")
-    println("Saved cooperation results to: $(joinpath(output_dir, \"all_conditions_group_means.csv\"))")
-    println("Saved Endowment results to: $(joinpath(output_dir, \"all_conditions_endowments.csv\"))")
-    println("Per-condition cooperation CSVs are in: $(joinpath(output_dir, \"condition_csvs\"))")
-    println("Per-condition Endowment CSVs are in: $(joinpath(output_dir, \"endowment_csvs\"))")
+    println("Saved manifest to: $(joinpath(output_dir, "manifest_conditions.csv"))")
+    println("Saved cooperation results to: $(joinpath(output_dir, "all_conditions_group_means.csv"))")
+    println("Saved Endowment results to: $(joinpath(output_dir, "all_conditions_endowments.csv"))")
+    println("Per-condition cooperation CSVs are in: $(joinpath(output_dir, "condition_csvs"))")
+    println("Per-condition Endowment CSVs are in: $(joinpath(output_dir, "endowment_csvs"))")
     return nothing
 end
 
