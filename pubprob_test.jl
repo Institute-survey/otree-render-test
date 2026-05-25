@@ -42,8 +42,8 @@ end
     using Random
 
     # ========== 初期値 ==========
-    const num_agent = 400              # エージェント数
-    const num_periods = Int(400)       # ピリオド数
+    const num_agent = 500              # エージェント数
+    const num_periods = Int(500)       # ピリオド数
     const cost_of_cooperation = 1.0    # 協力コスト
     const num_generations = 1000       # ジェネレーション数
     const mutation_rate = 0.01         # 突然変異確率
@@ -68,18 +68,13 @@ end
     # ========== ユーティリティ ==========
     normstring(v::Vector{Char}) = String(v)
 
-    function random_reputation()
-        return [rand(Bool) ? 'G' : 'B' for _ in 1:num_agent]
-    end
-
     function new_agent(id::Int)
         # 規範は G/B を長さ4でランダム
         norm = [rand(Bool) ? 'G' : 'B' for _ in 1:4]
-        # 評判ベクトルも全員分 G/B ランダム
-        rep = random_reputation()
+        rep = fill('G', num_agent)
+        rep[id] = 'G'
         Agent(id, 0.0, norm, rep)
     end
-
 
     function decide_action(agent::Agent, recipient_rep::Char)::Char
         ns = normstring(agent.norm)
@@ -163,10 +158,7 @@ end
         error_rate_action, error_rate_evaluation, error_rate_public_evaluation, benefit_of_cooperation, probability, public_norm_str, sim = params
         # 初期化
         agents = [new_agent(i) for i in 1:num_agent]
-        public_institution = PublicInstitution(
-            collect(public_norm_str),
-            random_reputation()
-        )
+        public_institution = PublicInstitution(collect(public_norm_str), fill('G', num_agent))
 
         cooperation_rates = Vector{Float64}()
         norm_distribution = Vector{Vector{Vector{Char}}}()  # genごとの全agentのnorm
@@ -268,18 +260,23 @@ end
                         new_norm[g] = inherited
                     end
                 end
-                # 次世代エージェントの初期評判も G/B ランダム
-                rep = random_reputation()
+                rep = fill('G', num_agent)
+                rep[idx] = 'G'
                 new_agents[idx] = Agent(idx, 0.0, new_norm, rep)
             end
             agents = new_agents
-
-            # 公的機関の評判も世代ごとに G/B ランダムにリセット
-            public_institution.reputation = random_reputation()
+            public_institution.reputation .= 'G'
         end
 
         # ファイル名キーの作成
-        file_prefix_without_sim = "$(num_agent)_$(public_norm_str)_probability$(probability)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)_benefit$(benefit_of_cooperation)"
+        #benefitの小数点以下丸める
+        benefit_str = if isinteger(benefit_of_cooperation)
+            string(Int(round(benefit_of_cooperation)))
+        else
+            string(benefit_of_cooperation)
+        end
+        
+        file_prefix_without_sim = "$(num_agent)_$(public_norm_str)_probability$(probability)_action_error$(error_rate_action)_evaluate_error$(error_rate_evaluation)_public_error$(error_rate_public_evaluation)_benefit$(benefit_str)"
         file_prefix = file_prefix_without_sim * "_$(sim+1)"
 
         # 規範分布CSVの保存
@@ -330,7 +327,7 @@ function main()
 
     error_rates_self = [0.01]
     error_rates_public = [0.01]
-    benefit_values = [1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+    benefit_values = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
     probability_values = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
     public_norms = ["GBBG", "GBGB", "GBGG", "GBBB"]
 
